@@ -1,0 +1,23 @@
+# 실행 데이터 (수집 DB, 내려받은 PDF, 사용자 설정, 로그인 쿠키 등) - 저장소에 올리지 않음
+data/
+output/
+questions.db
+*.db
+user_prefs.json
+*.log
+# 파이썬/도구 캐시
+__pycache__/
+*.pyc
+.claude/
+# 개발 중 임시/디버그 파일
+scratch_*.png
+page*_area.png
+check_target.hwpx
+exact_test.hwpx
+debug_q*.txt
+temp_q*.txt
+test.bin
+check_ids.py
+inspect_*.py
+# 대회 안내 원본
+붙임1 2026년 업무자동화 프로그램 개발대회 추진 계획.pdf
