@@ -7,6 +7,7 @@ import shutil
 import base64
 import zipfile
 import io
+import threading
 from datetime import datetime
 import streamlit as st
 
@@ -612,6 +613,73 @@ db = QuestionDB(db_path=db_path)
 crawler = EBSiCrawler()
 template_mgr = TemplateManager(output_dir=output_dir)
 
+# 앱을 처음 열자마자(로컬호스트가 뜬 직후) 조용히 백그라운드 스레드에서 EBSi·평가원
+# 응답 속도를 한 번 재둔다 - 화면 렌더링은 막지 않고, 나중에 수집 확인 팝업에서 "예상
+# 소요 시간"을 보여줄 때 이 값을 재사용해서 매번 새로 재느라 기다리는 일이 없게 한다.
+# @st.cache_resource라 프로세스(서버)당 딱 한 번만 스레드를 띄운다 - 세션이 여러 개
+# 열려도, 같은 조합에 대해 중복으로 요청을 보내지 않는다.
+@st.cache_resource
+def _get_latency_probe_store():
+    return {"lock": threading.Lock(), "data": {}, "started": set()}
+
+
+def _kick_off_background_latency_probe(crawler_instance, portals):
+    store = _get_latency_probe_store()
+    key = tuple(sorted(portals))
+    with store["lock"]:
+        if key in store["started"]:
+            return
+        store["started"].add(key)
+
+    def _worker():
+        try:
+            latencies = crawler_instance.measure_portal_latency(portals)
+        except Exception:
+            latencies = {p: None for p in portals}
+        with store["lock"]:
+            store["data"][key] = {
+                "portals": list(key),
+                "measured_at": time.time(),
+                "latencies": latencies,
+            }
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+_kick_off_background_latency_probe(crawler, ["EBSi", "한국교육과정평가원"])
+
+# "빠르다/느리다" 기준: 원래 조합당 2~6초 추정의 기준이 됐던 응답시간(_BASELINE_PORTAL_LATENCY,
+# 0.3초)의 약 3배인 1.0초를 문턱으로 잡는다 - 평소보다 눈에 띄게(3배 이상) 느려졌을 때만
+# 빨강으로 보여주고, 그 안쪽이면(원래도 사이트마다 0.3~1초 정도는 오갈 수 있으므로) 파랑으로
+# "원활"하다고 본다. 응답 실패(타임아웃 등)는 무조건 빨강 처리한다.
+_PORTAL_SPEED_FAST_SEC = 1.0
+
+
+def _get_portal_speed_dot(portal_name: str) -> str:
+    """
+    출처(EBSi/한국교육과정평가원) 이름 옆에 붙일 응답 속도 표시 점(●)을 HTML로 돌려준다.
+    앱을 열 때 조용히 백그라운드에서 재둔 값 중 이 출처를 포함하는 가장 최근 값을 쓰고,
+    5분 넘게 지났거나 아직 한 번도 측정되지 않았으면 "확인 중" 회색 점을 보여준다.
+    """
+    store = _get_latency_probe_store()
+    with store["lock"]:
+        entries = list(store["data"].values())
+    _fresh = None
+    for _entry in entries:
+        if portal_name in _entry.get("latencies", {}):
+            if _fresh is None or _entry["measured_at"] > _fresh["measured_at"]:
+                _fresh = _entry
+
+    if _fresh is None or (time.time() - _fresh["measured_at"]) > 300:
+        return "<span title='응답 속도 확인 중...' style='color:#94a3b8; font-size:11px;'>●</span>"
+
+    _lat = _fresh["latencies"].get(portal_name)
+    if _lat is None:
+        return "<span title='응답 없음(타임아웃/오류)' style='color:#dc2626; font-size:11px;'>●</span>"
+    if _lat <= _PORTAL_SPEED_FAST_SEC:
+        return f"<span title='응답 원활 ({_lat:.2f}초)' style='color:#2563eb; font-size:11px;'>●</span>"
+    return f"<span title='응답 느림 ({_lat:.2f}초)' style='color:#dc2626; font-size:11px;'>●</span>"
+
 filter_opts = db.get_filter_options()
 
 def get_header_html(latest_time_str: str, total_q_count: int = 0) -> str:
@@ -794,6 +862,18 @@ div.st-key-btn_mode_bottom_output button div {
     height: 100% !important;
     margin: 0 !important;
     padding: 0 !important;
+}
+
+div.st-key-btn_clear_all button p {
+    font-size: 13px !important;
+    font-weight: 800 !important;
+    color: #dc2626 !important;
+}
+
+div.st-key-btn_mode_top_preview button:disabled,
+div.st-key-btn_mode_bottom_preview button:disabled {
+    opacity: 0.4 !important;
+    cursor: not-allowed !important;
 }
 
 div.st-key-btn_mode_collect button p,
@@ -1096,12 +1176,18 @@ with st.container(border=True, key="filter_panel_wrapper"):
             with _pc1:
                 cb_kice = st.checkbox("한국교육과정평가원", key="t1_kice", label_visibility="collapsed")
             with _pc2:
-                st.markdown(f"[한국교육과정평가원 (KICE)](https://www.kice.re.kr) ({_n_kice:,}문항)")
+                st.markdown(
+                    f"{_get_portal_speed_dot('한국교육과정평가원')} [한국교육과정평가원 (KICE)](https://www.kice.re.kr) ({_n_kice:,}문항)",
+                    unsafe_allow_html=True,
+                )
             _pc3, _pc4 = st.columns([1, 9], vertical_alignment="center")
             with _pc3:
                 cb_ebsi = st.checkbox("EBSi 국가 교육 포털", key="t1_ebsi", label_visibility="collapsed")
             with _pc4:
-                st.markdown(f"[EBSi 국가 교육 포털](https://www.ebsi.co.kr) ({_n_ebsi:,}문항)")
+                st.markdown(
+                    f"{_get_portal_speed_dot('EBSi')} [EBSi 국가 교육 포털](https://www.ebsi.co.kr) ({_n_ebsi:,}문항)",
+                    unsafe_allow_html=True,
+                )
         # EBSi를 체크했을 때만 아래에 해설 자동 수집 영역이 활성화된다(내용은 필터 값이 다
         # 만들어진 뒤 아래쪽에서 이 자리에 채워 넣는다).
         ebsi_solution_slot = st.container(key="ebsi_solution_slot")
@@ -1379,10 +1465,11 @@ with st.container(border=True, key="filter_panel_wrapper"):
         _cond_count_html = ""
     _cond_title_slot.markdown(f"<div style='white-space:nowrap; overflow:visible;'>{_COND_TITLE_HTML}{_cond_count_html}</div>", unsafe_allow_html=True)
 
-    # 학년/연도/시험구분/과목 중 하나라도 2개 이상 선택되면 안내 - 조건이 유지되는 동안 매번 노출.
+    # 학년/연도/시험구분(1~4번 조건) 중 하나라도 2개 이상 선택되면 안내 - 조건이 유지되는 동안 매번 노출.
     # 학년·연도의 "전체"는 수집 시 실제 학년/연도 목록으로 펼쳐져 여러 번 반복 조회되므로 마찬가지로 안내한다.
+    # 과목(5번)만 여러 개 선택한 경우는(사용자 요청에 따라) 안내 대상에서 제외한다.
     if ((len(selected_grades) > 1 or len(selected_years) > 1
-            or len(selected_exam_types) > 1 or len(selected_subjects) > 1
+            or len(selected_exam_types) > 1
             or selected_grades == ["전체"] or selected_years == ["전체"])
             and not prefs.get("hide_combo_warning")):
         _top_combo_count = _estimate_collection_combos(
@@ -1522,6 +1609,31 @@ with main_display_area:
                     or _probe.get("portals") != sorted(selected_portals)
                     or (time.time() - _probe.get("measured_at", 0)) > 300
                 )
+
+                if _probe_stale:
+                    # 매번 새로 재기 전에, 앱을 열 때 백그라운드에서 조용히 미리 재둔 값이
+                    # 있는지부터 확인한다(선택한 출처를 모두 포함하고 5분 이내에 잰 것이면
+                    # 그대로 재사용) - 있으면 사용자를 기다리게 하지 않는다.
+                    _bg_store = _get_latency_probe_store()
+                    with _bg_store["lock"]:
+                        _bg_entries = list(_bg_store["data"].values())
+                    _fresh_bg = None
+                    for _entry in _bg_entries:
+                        if (time.time() - _entry.get("measured_at", 0)) <= 300 and all(
+                            p in _entry.get("latencies", {}) for p in selected_portals
+                        ):
+                            if _fresh_bg is None or _entry["measured_at"] > _fresh_bg["measured_at"]:
+                                _fresh_bg = _entry
+
+                    if _fresh_bg is not None:
+                        _probe = {
+                            "portals": sorted(selected_portals),
+                            "measured_at": _fresh_bg["measured_at"],
+                            "latencies": _fresh_bg["latencies"],
+                        }
+                        st.session_state[_probe_key] = _probe
+                        _probe_stale = False
+
                 if _probe_stale:
                     with st.spinner("사이트 응답 속도 확인 중..."):
                         _latencies = crawler.measure_portal_latency(selected_portals)
@@ -1532,7 +1644,8 @@ with main_display_area:
                     }
                     st.session_state[_probe_key] = _probe
 
-                _measured_values = [v for v in _probe["latencies"].values() if v is not None]
+                _measured_values = [_probe["latencies"].get(p) for p in selected_portals]
+                _measured_values = [v for v in _measured_values if v is not None]
                 if _measured_values:
                     _avg_latency = sum(_measured_values) / len(_measured_values)
                     _scale = max(0.3, min(_avg_latency / _BASELINE_LATENCY, 15))
@@ -1957,8 +2070,9 @@ with main_display_area:
             }
 
         # (제목 "맞춤형 한글(HWPX) 3종 세트 즉시 다운로드"는 화면 정리를 위해 제거)
-        def _top_preview_button():
-            if st.button("미리보기", icon=":material/visibility:", use_container_width=True, key="btn_mode_top_preview"):
+        def _top_preview_button(disabled=False):
+            if st.button("미리보기", icon=":material/visibility:", use_container_width=True, key="btn_mode_top_preview",
+                         disabled=disabled, help="수집된 문항이 없어 미리볼 수 없습니다." if disabled else None):
                 meta = _t2_search_and_meta_top()
                 if meta is None:
                     st.warning("⚠️ 선택하신 검색 조건에 부합하는 기출문제가 없습니다. 조건을 조금 더 넓혀보세요!")
@@ -1997,7 +2111,7 @@ with main_display_area:
             _top_fb = _get_or_build_t2_files(_top_meta)
             _render_local_folder_save(_top_fb, "top", lead=_top_preview_button, tabs=_top_mode_tabs)
         else:
-            _top_preview_button()
+            _top_preview_button(disabled=st.session_state.get("total_question_count", 0) == 0)
 
         d_col1, d_col2, d_col3 = st.columns(3)
 
@@ -2188,8 +2302,9 @@ def _t2_search_and_meta_bottom():
 
 
 st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-def _bottom_preview_button():
-    if st.button("미리보기", icon=":material/visibility:", use_container_width=True, key="btn_mode_bottom_preview"):
+def _bottom_preview_button(disabled=False):
+    if st.button("미리보기", icon=":material/visibility:", use_container_width=True, key="btn_mode_bottom_preview",
+                 disabled=disabled, help="수집된 문항이 없어 미리볼 수 없습니다." if disabled else None):
         meta = _t2_search_and_meta_bottom()
         if meta is None:
             st.warning("⚠️ 선택하신 검색 조건에 부합하는 기출문제가 없습니다. 조건을 조금 더 넓혀보세요!")
@@ -2216,4 +2331,4 @@ if _bottom_meta is not None:
     _bottom_fb = _get_or_build_t2_files(_bottom_meta)
     _render_local_folder_save(_bottom_fb, "bottom", lead=_bottom_preview_button)
 else:
-    _bottom_preview_button()
+    _bottom_preview_button(disabled=st.session_state.get("total_question_count", 0) == 0)
