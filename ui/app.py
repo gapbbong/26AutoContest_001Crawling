@@ -14,6 +14,9 @@ import streamlit as st
 # 프로젝트 루트 경로 등록
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR)
+# 실행 데이터(수집 DB·설정·출력물)를 두는 위치. 단일 exe로 배포했을 때는 읽기 전용 리소스 폴더가 아니라
+# exe가 있는 폴더를 쓰도록 main.py가 APP_DATA_DIR 환경변수로 알려준다(소스 실행 시에는 프로젝트 폴더).
+DATA_ROOT = os.environ.get("APP_DATA_DIR") or PARENT_DIR
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
@@ -226,7 +229,7 @@ h4 {
 """, unsafe_allow_html=True)
 
 # 마지막으로 사용한 수집 조건 로컬 저장/복원 (다음 실행 시 그 조건이 기본 선택되도록)
-PREFS_PATH = os.path.join(PARENT_DIR, "data", "user_prefs.json")
+PREFS_PATH = os.path.join(DATA_ROOT, "data", "user_prefs.json")
 
 def load_prefs() -> dict:
     try:
@@ -607,8 +610,8 @@ def _format_minutes(total_minutes: float) -> str:
 prefs = load_prefs()
 
 # DB 및 모듈 인스턴스 초기화
-db_path = os.path.join(PARENT_DIR, "data", "questions.db")
-output_dir = os.path.join(PARENT_DIR, "output")
+db_path = os.path.join(DATA_ROOT, "data", "questions.db")
+output_dir = os.path.join(DATA_ROOT, "output")
 db = QuestionDB(db_path=db_path)
 crawler = EBSiCrawler()
 template_mgr = TemplateManager(output_dir=output_dir)
@@ -1860,7 +1863,7 @@ with main_display_area:
 
                         now_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
                         date_db_filename = f"questions_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
-                        shutil.copyfile(db_path, os.path.join(PARENT_DIR, "data", date_db_filename))
+                        shutil.copyfile(db_path, os.path.join(DATA_ROOT, "data", date_db_filename))
 
                         total_cnt = db.get_total_question_count()
                         # 화면 아래쪽 "공공 출처별/학년별/..." 현황판이 이 값들을 그대로 재사용하므로,

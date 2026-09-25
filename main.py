@@ -10,7 +10,17 @@ import subprocess
 import pathlib
 from datetime import datetime
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.log")
+FROZEN = bool(getattr(sys, "frozen", False))  # PyInstaller로 만든 단일 exe로 실행 중인지
+# 리소스(ui/app.py, assets, 서식 xml)는 exe 안(_MEIPASS), 실행 데이터(data/, output/, run.log)는 exe 옆 폴더
+RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+APP_DIR = os.path.dirname(sys.executable) if FROZEN else os.path.dirname(os.path.abspath(__file__))
+if FROZEN:
+    os.environ["APP_DATA_DIR"] = APP_DIR
+    try:
+        os.chdir(APP_DIR)  # 코드 곳곳의 상대경로("data/downloads" 등)가 exe 옆 폴더 기준이 되도록
+    except Exception:
+        pass
+LOG_PATH = os.path.join(APP_DIR, "run.log")
 
 # 콘솔이 없는 pythonw 실행 환경에서도 안전하게: 있으면 UTF-8/줄단위 flush로 감싸고,
 # 없으면(sys.stdout이 None) 그대로 둔다 - 이후 코드는 print()에 의존하지 않는다.
@@ -62,6 +72,8 @@ def check_dependencies():
         ("bs4", "beautifulsoup4"),
         ("requests", "requests"),
         ("PIL", "Pillow"),
+        ("selenium", "selenium"),
+        ("fitz", "PyMuPDF"),
     ]:
         try:
             __import__(module_name)
@@ -170,7 +182,7 @@ def run_backend(splash_queue: "queue.Queue", state: dict):
     ensure_streamlit_credentials()
 
     splash_queue.put(("status", "필수 패키지 확인 중...", ""))
-    missing = check_dependencies()
+    missing = [] if FROZEN else check_dependencies()
     if missing:
         pkg_list = ", ".join(missing)
         splash_queue.put(("error",
@@ -178,17 +190,20 @@ def run_backend(splash_queue: "queue.Queue", state: dict):
             f"'{sys.executable} -m pip install -r requirements.txt' 실행 후 다시 시작해 주세요."))
         return
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    app_path = os.path.join(base_dir, "ui", "app.py")
+    app_path = os.path.join(RESOURCE_DIR, "ui", "app.py")
     os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
-    cmd = [
-        sys.executable, "-m", "streamlit", "run", app_path,
-        "--server.port=8501",
-        "--server.address=localhost",
-        "--browser.gatherUsageStats=false",
-        "--server.headless=true",
-    ]
+    if FROZEN:
+        # 단일 exe: 같은 exe를 "--serve" 인자로 한 번 더 실행해 그 프로세스가 Streamlit 서버 역할을 한다
+        cmd = [sys.executable, "--serve"]
+    else:
+        cmd = [
+            sys.executable, "-m", "streamlit", "run", app_path,
+            "--server.port=8501",
+            "--server.address=localhost",
+            "--browser.gatherUsageStats=false",
+            "--server.headless=true",
+        ]
 
     splash_queue.put(("status", "웹 서버를 준비하고 있습니다...",
                        "Python 라이브러리 로딩과 서버 구동에\n처음 실행 시 5~15초 정도 걸릴 수 있습니다."))
@@ -287,5 +302,35 @@ def main():
     splash.root.mainloop()
 
 
+def serve_streamlit():
+    """단일 exe 안에서 Streamlit 서버를 직접 실행한다(별도 파이썬 설치 없이 동작)."""
+    # 콘솔 없는(windowed) exe에서는 stdout/stderr가 None이라 로깅 라이브러리가 죽을 수 있어 로그 파일로 돌린다
+    if sys.stdout is None or sys.stderr is None:
+        try:
+            _f = open(os.path.join(APP_DIR, "run.log"), "a", encoding="utf-8", buffering=1)
+            sys.stdout = sys.stdout or _f
+            sys.stderr = sys.stderr or _f
+        except Exception:
+            pass
+    ensure_streamlit_credentials()
+    app_path = os.path.join(RESOURCE_DIR, "ui", "app.py")
+    sys.argv = [
+        "streamlit", "run", app_path,
+        "--global.developmentMode=false",
+        "--server.port=8501",
+        "--server.address=localhost",
+        "--server.headless=true",
+        "--server.fileWatcherType=none",
+        "--browser.gatherUsageStats=false",
+    ]
+    from streamlit.web import cli as stcli
+    stcli.main()
+
+
 if __name__ == "__main__":
-    main()
+    import multiprocessing
+    multiprocessing.freeze_support()
+    if "--serve" in sys.argv:
+        serve_streamlit()
+    else:
+        main()

@@ -21,3 +21,8 @@ check_ids.py
 inspect_*.py
 # 대회 안내 원본
 붙임1 2026년 업무자동화 프로그램 개발대회 추진 계획.pdf
+
+# PyInstaller 빌드 산출물
+build/
+dist/
+build.log

@@ -1,6 +1,8 @@
+# 소스로 직접 실행할 때만 필요합니다. 단일 exe(ExamCollector.exe)에는 모두 포함되어 있어 설치가 필요 없습니다.
+# Python 3.10 ~ 3.14 (64bit)에서 확인. 아래 패키지는 모두 Windows용 설치 파일(wheel)이 제공되어 컴파일러 없이 설치됩니다.
+streamlit>=1.30.0
 beautifulsoup4>=4.12.0
 requests>=2.31.0
-streamlit>=1.30.0
 Pillow>=10.0.0
 selenium>=4.15.0
 PyMuPDF>=1.24.0
